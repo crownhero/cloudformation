@@ -1,0 +1,242 @@
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Name for the ECS cluster
+
+  ServiceName:
+    Type: String
+    Description: Name for the ECS service
+
+  TaskDefinitionName:
+    Type: String
+    Description: Name for the ECS task definition
+
+  ContainerName:
+    Type: String
+    Description: Name for the container within the task definition
+
+  Image:
+    Type: String
+    Description: Docker image URL for the container
+  
+  Vpc:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC id 
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnet IDs where the ALB will be deployed
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs where ECS services will be deployed
+
+  EnvironmentVariables1:
+    Type: string
+  EnvironmentVariables2:
+    Type: string
+
+Resources:
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-ECS-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        #- arn:aws:iam::${AWS::AccountId}:policy/SecretsManagerPolicy-ECSTaskExecution
+      
+  
+  # SecretsManagerPolicy:
+  #   Type: AWS::IAM::ManagedPolicy
+  #   Properties:
+  #     #PolicyName: !Sub ${ServiceName}-SecretsManager-Policy
+  #     PolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Effect: Allow
+  #           Action:
+  #             - secretsmanager:GetSecretValue
+  #           Resource:
+  #              - arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:waverlite_env_secrets-wJLScp:*
+              
+
+
+      
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref TaskDefinitionName
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ECSRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image: !Ref Image
+          PortMappings:
+            - ContainerPort: 80
+          # Secrets:
+          #   - Name: INF_WAVERLITE_CORE_PRODUCT_KEY
+          #     ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:waverlite_env_secrets-wJLScp:INF_WAVERLITE_CORE_PRODUCT_KEY::"
+          #   - Name: WT_KH_WAVERLITE_WEB_PRODUCT_KEY
+          #     ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:waverlite_env_secrets-wJLScp:WT_KH_WAVERLITE_WEB_PRODUCT_KEY::"
+          Environment:
+          - Name: INF_WAVERLITE_CORE_PRODUCT_KEY
+            Value: !Ref EnvironmentVariable1
+          - Name: WT_KH_WAVERLITE_WEB_PRODUCT_KEY
+            Value: !Ref EnvironmentVariable2
+  
+  EcsCoreSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http and https and database connection
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref Vpc
+
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ServiceName}-ALB
+      Subnets: !Ref PublicSubnetIds
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+      Tags:
+        - Key: Name
+          Value: !Sub ${ServiceName}-ALB
+      
+
+  
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ServiceName}-TargetGroup
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref Vpc
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: "/"
+      HealthCheckPort: "traffic-port"
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: 200
+      TargetType: ip
+      
+      
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            ContentType: "text/plain"
+            StatusCode: "200"
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+  
+  MyListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - "/*"
+      ListenerArn: !Ref Listener
+      Priority: 1
+
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: !Ref ServiceName
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 1  
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups : 
+           - !GetAtt EcsCoreSG.GroupId
+      LoadBalancers: 
+        - TargetGroupArn: !Ref TargetGroup
+          ContainerPort: 80
+          ContainerName: !Ref ContainerName
+  
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 5  
+      MinCapacity: 1
+      ResourceId: !Sub "service/${ClusterName}/${ServiceName}"
+      #RoleARN: !GetAtt "AutoscalingRole.Arn"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ECSAutoScalingPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 10
+            ScalingAdjustment: 1
+          - MetricIntervalLowerBound: 10
+            ScalingAdjustment: 4
+    
+  TargetTrackingScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: cpu75-target-tracking-scaling-policy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 65.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+      
+
+Outputs:
+  ApplicationURL:
+    Description: URL of the deployed application
+    Value: !GetAtt ALB.DNSName
