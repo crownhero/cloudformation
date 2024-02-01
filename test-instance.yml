@@ -1,0 +1,35 @@
+Parameters:
+  NameOfService:
+    Type: String
+    Description: "This is to test serverless applications"
+  KeyName:
+    Description: "For EC2 test login"
+    Type: AWS::EC2::KeyPair::KeyName
+
+Resources:
+  MyTestInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: "ami-0e5f882be1900e43b"  # Ubuntu in eu-west-2
+      Tags:
+        - Key: "Name"
+          Value: "test-serverless"
+        - Key: "SGName"
+          Value: !Ref SeverlessTestSG
+      SubnetId: "subnet-05a1e45d24cf68858"
+      KeyName: !Ref KeyName  # Reference the KeyName parameter
+
+  SeverlessTestSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http and ssh connection
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp  # Fix: Use "tcp" instead of "ssh" for the protocol
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
